@@ -41,38 +41,41 @@
 ### Реляційна схема (Фізична модель)
 ![Реляційна-схема](dbSchema.png)
 
-Реляційна схема (Опис таблиць)
-auth.author
+### Реляційна схема (Опис таблиць)
 
-author_id (integer, PK, AI)
+**`auth.author`**
+* `author_id` (integer, PK, AI)
+* `last_name` (text, NOT NULL)
+* `first_name` (text, NOT NULL)
+* `email` (text, UNIQUE)
 
-last_name (text)
+**`auth.book`**
+* `book_id` (integer, PK, AI)
+* `name` (text, NOT NULL)
+* `year_published` (integer)
+* `pages` (integer)
+* `id_author` (integer, FK -> author.author_id)
 
-first_name (text)
+**`auth.reader`**
+* `reader_id` (integer, PK, AI)
+* `last_name` (text, NOT NULL)
+* `first_name` (text, NOT NULL)
+* `email` (text, UNIQUE)
 
-email (text, UNIQUE)
+**`auth."LoanJournal"`**
+* `loan_id` (integer, PK, AI)
+* `id_book` (integer, NOT NULL, FK -> book.book_id)
+* `id_reader` (integer, NOT NULL, FK -> reader.reader_id)
+* `loan_date` (date, NOT NULL)
+* `return_date` (date)
 
-auth.book
+---
 
-book_id (integer, PK, AI)
+## 3. Технології
 
-name (text)
-
-year_published (integer)
-
-pages (integer)
-
-id_author (integer, FK -> author.author_id)
-
-auth.reader
-reader_id (integer, PK, AI)
-last_name (text)
-first_name (text)
-email (text, UNIQUE)
-auth."LoanJournal"
-loan_id (integer, PK, AI)
-id_book (integer, FK -> book.book_id)
-id_reader (integer, FK -> reader.reader_id)
-loan_date (date)
-return_date (date)
-
+* **Мова програмування:** Python 3.11
+* **Система управління базами даних (СУБД):** PostgreSQL
+* **Інструмент БД:** PgAdmin4
+* **Бібліотеки Python:**
+    * **Psycopg 2** (для взаємодії з БД)
+    * **time** (для вимірювання швидкодії запитів)
