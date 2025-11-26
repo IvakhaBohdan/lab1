@@ -1,0 +1,64 @@
+ТРИГЕРНА ФУНКЦІЯ:
+
+
+CREATE OR REPLACE FUNCTION auth.check_loan_limit()
+RETURNS TRIGGER AS $$
+DECLARE
+    current_loans INTEGER;
+    loan_record RECORD;
+    -- ЛІМІТ: ДВІ КНИГИ
+    MAX_LOANS CONSTANT INTEGER := 2;
+    needed_to_return INTEGER;
+BEGIN
+    -- 1. Перевірка повернення (для UPDATE)
+    IF NEW.return_date IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+
+
+    -- 2. Підрахунок поточних активних позик (включно з поточною книгою)
+    SELECT
+        COUNT(*)
+    INTO
+        current_loans
+    FROM
+        auth."LoanJournal"
+    WHERE
+        id_reader = NEW.id_reader
+        AND return_date IS NULL;
+   
+    -- 3. Обчислення кількості книг, які потрібно повернути.
+    needed_to_return := (current_loans - MAX_LOANS);
+   
+
+
+    -- 4. Обробка виключної ситуації: блокуємо, якщо current_loans > 2
+    IF current_loans > MAX_LOANS THEN
+        RAISE EXCEPTION 'Читач з ID % перевищив ліміт в % книги. Потрібно повернути книги!', NEW.id_reader, MAX_LOANS
+        USING HINT = 'Спершу поверніть ' || needed_to_return || ' книг.';
+    END IF;
+
+
+    -- 5. Демонстрація курсорного циклу
+    RAISE NOTICE 'Успішна видача';
+    RAISE NOTICE 'Перевірка активних позик для читача ID %:', NEW.id_reader;
+   
+    FOR loan_record IN
+        SELECT book_id FROM auth.book WHERE book_id IN (
+            SELECT id_book FROM auth."LoanJournal" WHERE id_reader = NEW.id_reader AND return_date IS NULL
+        )
+    LOOP
+        RAISE NOTICE 'Активна книга: %', loan_record.book_id;
+    END LOOP;
+   
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+СТВОРЕННЯ ТРИГЕРУ:
+
+CREATE TRIGGER loan_limit_trigger
+AFTER INSERT OR UPDATE ON auth."LoanJournal"
+FOR EACH ROW
+EXECUTE FUNCTION auth.check_loan_limit();
