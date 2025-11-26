@@ -1,221 +1,391 @@
-import psycopg2
-import psycopg2.extras
-import psycopg2.errors 
+import time
+from datetime import datetime, date
+
+from sqlalchemy import create_engine, Column, Integer, String, Date, ForeignKey, CheckConstraint, text
+from sqlalchemy.orm import sessionmaker, relationship, backref
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.exc import IntegrityError, DataError, ProgrammingError, OperationalError
+from sqlalchemy.orm import class_mapper
+
+
+DATABASE_URL = "postgresql+psycopg2://postgres:1111@localhost:5432/postgres?options=-c search_path=auth,public"
+Base = declarative_base()
+
+class Author(Base):
+    __tablename__ = 'author'
+    author_id = Column(Integer, primary_key=True)
+    last_name = Column(String, nullable=False)
+    first_name = Column(String, nullable=False)
+    email = Column(String, unique=True)
+    
+    books = relationship("Book", backref="author", passive_deletes=True) 
+
+    def to_dict_for_view(self):
+        return {
+            'author_id': self.author_id,
+            'last_name': self.last_name,
+            'first_name': self.first_name,
+            'email': self.email
+        }
+
+class Reader(Base):
+    __tablename__ = 'reader'
+    reader_id = Column(Integer, primary_key=True)
+    last_name = Column(String, nullable=False)
+    first_name = Column(String, nullable=False)
+    email = Column(String, unique=True)
+    
+    loans = relationship("LoanJournal", backref="reader", passive_deletes=True)
+    
+    def to_dict_for_view(self):
+        return {
+            'reader_id': self.reader_id,
+            'last_name': self.last_name,
+            'first_name': self.first_name,
+            'email': self.email
+        }
+
+class Book(Base):
+    __tablename__ = 'book'
+    book_id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    year_published = Column(Integer)
+    pages = Column(Integer)
+    id_author = Column(Integer, ForeignKey('author.author_id', ondelete='RESTRICT')) 
+    
+    loans = relationship("LoanJournal", backref="book", passive_deletes=True)
+
+    def get_validation_details(self):
+        return {
+            'year_published': self.year_published,
+            'name': self.name
+        }
+
+class LoanJournal(Base):
+    __tablename__ = 'LoanJournal'
+    loan_id = Column(Integer, primary_key=True)
+    
+    id_book = Column(Integer, ForeignKey('book.book_id', ondelete='RESTRICT'), nullable=False)
+    id_reader = Column(Integer, ForeignKey('reader.reader_id', ondelete='RESTRICT'), nullable=False)
+    
+    loan_date = Column(Date, nullable=False)
+    return_date = Column(Date, default=None)
+    
+    __table_args__ = (
+        CheckConstraint('return_date IS NULL OR return_date >= loan_date', name='check_return_date_valid'),
+    )
+
 
 class Model:
     def __init__(self):
         try:
-            self.conn = psycopg2.connect(
-                dbname='postgres', 
-                user='postgres',    
-                password='1111',  
-                host='localhost',
-                options='-c search_path=auth,public',
-                port=5432 
-            )
-            self.conn.autocommit = False 
-            self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-            print("З'єднання з БД успішно встановлено.")
+            self.engine = create_engine(DATABASE_URL)
+            self.Session = sessionmaker(bind=self.engine)
+            
             self.create_tables()
-        except psycopg2.Error as e:
-            print(f"Помилка підключення до БД: {e}")
+            print("З'єднання з БД успішно встановлено.")
+        except OperationalError as e:
+            print(f"Помилка підключення до БД. Перевірте: {self.engine.url.render_as_string()} та налаштування сервера. Деталі: {e}")
+            exit(1)
+        except Exception as e:
+            print(f"Критична помилка ініціалізації: {e}")
             exit(1)
 
     def create_tables(self):
         try:
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS author (
-                    author_id SERIAL PRIMARY KEY,
-                    last_name TEXT NOT NULL,
-                    first_name TEXT NOT NULL,
-                    email TEXT UNIQUE
-                );
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS reader (
-                    reader_id SERIAL PRIMARY KEY,
-                    last_name TEXT NOT NULL,
-                    first_name TEXT NOT NULL,
-                    email TEXT UNIQUE
-                );
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS book (
-                    book_id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    year_published INT,
-                    pages INT,
-                    id_author INT,
-                    CONSTRAINT fk_author
-                        FOREIGN KEY(id_author) 
-                        REFERENCES author(author_id)
-                        ON DELETE RESTRICT
-                );
-            """)
-            self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS "LoanJournal" (
-                    loan_id SERIAL PRIMARY KEY,
-                    id_book INT NOT NULL,
-                    id_reader INT NOT NULL,
-                    loan_date DATE NOT NULL DEFAULT CURRENT_DATE,
-                    return_date DATE,
-                    CONSTRAINT fk_book
-                        FOREIGN KEY(id_book) 
-                        REFERENCES book(book_id)
-                        ON DELETE RESTRICT, 
-                    CONSTRAINT fk_reader
-                        FOREIGN KEY(id_reader) 
-                        REFERENCES reader(reader_id)
-                        ON DELETE RESTRICT, 
-                    CHECK (return_date IS NULL OR return_date >= loan_date)
-                );
-            """)
-            self.conn.commit() 
+            Base.metadata.create_all(self.engine) 
             print("Таблиці успішно перевірені/створені.")
-        except psycopg2.Error as e:
+        except Exception as e:
             print(f"Помилка при створенні таблиць: {e}")
-            self.conn.rollback()
 
-
-    def _execute_query(self, query, params=None, fetch=True):
+    # Допоміжні методи DML 
+    def _execute_dml_orm(self, session, entity_instance=None, commit_on_success=True):
         try:
-            self.cursor.execute(query, params)
-            self.conn.commit() 
-            if fetch:
-                return self.cursor.fetchall()
-            return None
-        except (psycopg2.Error, psycopg2.DataError) as e:
-            print(f"Помилка читання (SELECT): {e}")
-            self.conn.rollback()
-            return None
-
-    def _execute_dml(self, query, params=None):
-        try:
-            self.cursor.execute(query, params)
-            self.conn.commit() 
+            if entity_instance is not None:
+                session.add(entity_instance)
+            
+            if commit_on_success:
+                session.commit() 
             return (True, None)
         
-        except psycopg2.errors.UniqueViolation as e:
-            self.conn.rollback()
-            return (False, "Порушення унікальності. Можливо, такий email вже існує.")
-        
-        except psycopg2.errors.ForeignKeyViolation as e:
-            self.conn.rollback()
-            return (False, "Порушення зв'язності даних. (Наприклад, не можна видалити сутність, на яку посилається журнал).")
-        
-        except psycopg2.errors.NotNullViolation as e:
-            self.conn.rollback()
-            return (False, f"Не заповнене обов'язкове поле.")
-        
-        except (psycopg2.Error, psycopg2.DataError) as e:
-            self.conn.rollback() 
-            return (False, f"Загальна помилка SQL: {e}")
+        except IntegrityError as e:
+            session.rollback()
+            error_msg = str(e)
+            if 'unique constraint' in error_msg or 'UniqueViolation' in error_msg:
+                return (False, "Порушення унікальності. Можливо, такий email вже існує.")
+            if 'foreign key constraint' in error_msg or 'ForeignKeyViolation' in error_msg:
+                return (False, "Порушення зв'язності даних. (Наприклад, не можна видалити сутність, на яку посилається журнал).")
+            if 'not null constraint' in error_msg or 'NotNullViolation' in error_msg:
+                return (False, "Не заповнене обов'язкове поле.")
+            if 'check constraint' in error_msg or 'check_return_date_valid' in error_msg:
+                return (False, "Порушення умови: дата повернення не може бути раніше дати видачі.")
+            
+            return (False, f"Загальна помилка цілісності даних: {e}")
 
-    # Перегляд даних 
-    def get_authors(self):
-        return self._execute_query("SELECT * FROM author ORDER BY author_id", fetch=True)
+        except DataError as e:
+            session.rollback()
+            return (False, f"Помилка даних (наприклад, некоректний тип): {e}")
+        
+        except Exception as e:
+            session.rollback() 
+            return (False, f"Загальна помилка SQL: {e}")
+        
+    # Перегляд даних (SELECT) 
     
-    def get_books(self):
-        query = """
-            SELECT b.book_id, b.name, b.year_published, b.pages, a.last_name || ' ' || a.first_name AS author_name
-            FROM book b LEFT JOIN author a ON b.id_author = a.author_id
-            ORDER BY b.book_id
-        """
-        return self._execute_query(query, fetch=True)
+    def get_authors(self):
+        session = self.Session()
+        try:
+            authors = session.query(Author).order_by(Author.author_id).all()
+            return [a.to_dict_for_view() for a in authors]
+        finally:
+            session.close()
 
     def get_readers(self):
-        return self._execute_query("SELECT * FROM reader ORDER BY reader_id", fetch=True)
+        session = self.Session()
+        try:
+            readers = session.query(Reader).order_by(Reader.reader_id).all()
+            return [r.to_dict_for_view() for r in readers]
+        finally:
+            session.close()
+    
+    def get_books(self):
+        session = self.Session()
+        try:
+            books_data = session.query(
+                Book.book_id,
+                Book.name,
+                Book.year_published,
+                Book.pages,
+                (Author.last_name + ' ' + Author.first_name).label('author_name')
+            ).join(Author, Book.id_author == Author.author_id, isouter=True)\
+             .order_by(Book.book_id).all()
+        
+            return [row._asdict() for row in books_data]
+        finally:
+            session.close()
 
     def get_loans(self):
-        query = """
-            SELECT l.loan_id, b.name AS book_title, r.last_name || ' ' || r.first_name AS reader_name, l.loan_date, l.return_date
-            FROM "LoanJournal" l
-            JOIN book b ON l.id_book = b.book_id
-            JOIN reader r ON l.id_reader = r.reader_id
-            ORDER BY l.loan_id ASC
-        """
-        return self._execute_query(query, fetch=True)
+        session = self.Session()
+        try:
+            loans_data = session.query(
+                LoanJournal.loan_id, 
+                Book.name.label('book_title'), 
+                (Reader.last_name + ' ' + Reader.first_name).label('reader_name'),
+                LoanJournal.loan_date,
+                LoanJournal.return_date
+            ).join(Book, LoanJournal.id_book == Book.book_id)\
+             .join(Reader, LoanJournal.id_reader == Reader.reader_id)\
+             .order_by(LoanJournal.loan_id.asc()).all()
+            
+            
+            return [row._asdict() for row in loans_data]
+        finally:
+            session.close()
 
-    # Методи для валідації
+    # Методи для валідації 
+    
     def get_entity_by_id(self, entity_name, entity_id):
-        allowed_entities = {
-            'author': ('author', 'author_id'),
-            'book': ('book', 'book_id'),
-            'reader': ('reader', 'reader_id'),
-            'LoanJournal': ('"LoanJournal"', 'loan_id') 
+        session = self.Session()
+        
+        entity_map = {
+            'author': Author,
+            'book': Book,
+            'reader': Reader,
+            'LoanJournal': LoanJournal
         }
         
-        if entity_name not in allowed_entities:
+        if entity_name not in entity_map:
+            session.close()
             return None 
+
+        EntityClass = entity_map[entity_name]
+        try:
+            pk_column = class_mapper(EntityClass).primary_key[0]
+            
+            result = session.query(pk_column).filter(pk_column == entity_id).first()
+            
+            return [1] if result else None 
         
-        table_name, id_column = allowed_entities[entity_name]
-        query = f"SELECT 1 FROM {table_name} WHERE {id_column} = %s"
-        
-        result = self._execute_query(query, (entity_id,), fetch=True)
-        return result 
+        finally:
+            session.close()
     
     def get_book_validation_details(self, book_id):
-        query = "SELECT year_published, name FROM book WHERE book_id = %s"
-        result = self._execute_query(query, (book_id,), fetch=True)
-        
-        if result:
-            return result[0] 
-        return None
+        session = self.Session()
+        try:
+            book = session.query(Book).filter(Book.book_id == book_id).first()
+            
+            if book:
+                return book.get_validation_details()
+            return None
+        finally:
+            session.close()
     
-    # Додавання запису 
+    # Додавання запису (INSERT)
+    
     def add_author(self, last_name, first_name, email):
-        query = "INSERT INTO author (last_name, first_name, email) VALUES (%s, %s, %s)"
-        return self._execute_dml(query, (last_name, first_name, email))
+        session = self.Session()
+        new_author = Author(last_name=last_name, first_name=first_name, email=email)
+        response = self._execute_dml_orm(session, new_author)
+        session.close()
+        return response
 
     def add_reader(self, last_name, first_name, email):
-        query = "INSERT INTO reader (last_name, first_name, email) VALUES (%s, %s, %s)"
-        return self._execute_dml(query, (last_name, first_name, email))
+        session = self.Session()
+        new_reader = Reader(last_name=last_name, first_name=first_name, email=email)
+        response = self._execute_dml_orm(session, new_reader)
+        session.close()
+        return response
 
     def add_book(self, name, year_published, pages, id_author):
-        query = "INSERT INTO book (name, year_published, pages, id_author) VALUES (%s, %s, %s, %s)"
-        return self._execute_dml(query, (name, year_published, pages, id_author))
+        session = self.Session()
+        new_book = Book(name=name, year_published=year_published, pages=pages, id_author=id_author)
+        response = self._execute_dml_orm(session, new_book)
+        session.close()
+        return response
 
     def add_loan(self, id_book, id_reader, loan_date, return_date):
-        query = 'INSERT INTO "LoanJournal" (id_book, id_reader, loan_date, return_date) VALUES (%s, %s, %s, %s)'
-        return self._execute_dml(query, (id_book, id_reader, loan_date, return_date))
+        session = self.Session()
+        new_loan = LoanJournal(id_book=id_book, id_reader=id_reader, loan_date=loan_date, return_date=return_date)
+        response = self._execute_dml_orm(session, new_loan)
+        session.close()
+        return response
 
-    # Редагування запису 
+    # Редагування запису (UPDATE)
+    
     def update_author(self, author_id, last_name, first_name, email):
-        query = "UPDATE author SET last_name = %s, first_name = %s, email = %s WHERE author_id = %s"
-        return self._execute_dml(query, (last_name, first_name, email, author_id))
+        session = self.Session()
+        try:
+            author_to_update = session.query(Author).filter(Author.author_id == author_id).first()
+            if not author_to_update:
+                session.close()
+                return (False, f"Автора з ID {author_id} не знайдено.")
+            
+            author_to_update.last_name = last_name
+            author_to_update.first_name = first_name
+            author_to_update.email = email
+            
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
     def update_reader(self, reader_id, last_name, first_name, email):
-        query = "UPDATE reader SET last_name = %s, first_name = %s, email = %s WHERE reader_id = %s"
-        return self._execute_dml(query, (last_name, first_name, email, reader_id))
+        session = self.Session()
+        try:
+            reader_to_update = session.query(Reader).filter(Reader.reader_id == reader_id).first()
+            if not reader_to_update:
+                session.close()
+                return (False, f"Читача з ID {reader_id} не знайдено.")
+            
+            reader_to_update.last_name = last_name
+            reader_to_update.first_name = first_name
+            reader_to_update.email = email
+            
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
     def update_book(self, book_id, name, year_published, pages, id_author):
-        query = "UPDATE book SET name = %s, year_published = %s, pages = %s, id_author = %s WHERE book_id = %s"
-        return self._execute_dml(query, (name, year_published, pages, id_author, book_id))
+        session = self.Session()
+        try:
+            book_to_update = session.query(Book).filter(Book.book_id == book_id).first()
+            if not book_to_update:
+                session.close()
+                return (False, f"Книги з ID {book_id} не знайдено.")
+            
+            book_to_update.name = name
+            book_to_update.year_published = year_published
+            book_to_update.pages = pages
+            book_to_update.id_author = id_author
+            
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
     def update_loan(self, loan_id, id_book, id_reader, loan_date, return_date):
-        query = 'UPDATE "LoanJournal" SET id_book = %s, id_reader = %s, loan_date = %s, return_date = %s WHERE loan_id = %s'
-        return self._execute_dml(query, (id_book, id_reader, loan_date, return_date, loan_id))
+        session = self.Session()
+        try:
+            loan_to_update = session.query(LoanJournal).filter(LoanJournal.loan_id == loan_id).first()
+            if not loan_to_update:
+                session.close()
+                return (False, f"Запису журналу з ID {loan_id} не знайдено.")
+            
+            loan_to_update.id_book = id_book
+            loan_to_update.id_reader = id_reader
+            loan_to_update.loan_date = loan_date
+            loan_to_update.return_date = return_date
+            
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
-    # Видалення запису 
+    # Видалення запису (DELETE)
+    
     def delete_author(self, author_id):
-        query = "DELETE FROM author WHERE author_id = %s"
-        return self._execute_dml(query, (author_id,))
+        session = self.Session()
+        try:
+            author_to_delete = session.query(Author).filter(Author.author_id == author_id).first()
+            if not author_to_delete:
+                session.close()
+                return (False, f"Автора з ID {author_id} не знайдено.")
+            
+            session.delete(author_to_delete)
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
     
     def delete_book(self, book_id):
-        query = "DELETE FROM book WHERE book_id = %s"
-        return self._execute_dml(query, (book_id,))
+        session = self.Session()
+        try:
+            book_to_delete = session.query(Book).filter(Book.book_id == book_id).first()
+            if not book_to_delete:
+                session.close()
+                return (False, f"Книги з ID {book_id} не знайдено.")
+            
+            session.delete(book_to_delete)
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
     
     def delete_reader(self, reader_id):
-        query = "DELETE FROM reader WHERE reader_id = %s"
-        return self._execute_dml(query, (reader_id,))
+        session = self.Session()
+        try:
+            reader_to_delete = session.query(Reader).filter(Reader.reader_id == reader_id).first()
+            if not reader_to_delete:
+                session.close()
+                return (False, f"Читача з ID {reader_id} не знайдено.")
+            
+            session.delete(reader_to_delete)
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
     def delete_loan(self, loan_id):
-        query = 'DELETE FROM "LoanJournal" WHERE loan_id = %s'
-        return self._execute_dml(query, (loan_id,))
+        session = self.Session()
+        try:
+            loan_to_delete = session.query(LoanJournal).filter(LoanJournal.loan_id == loan_id).first()
+            if not loan_to_delete:
+                session.close()
+                return (False, f"Запису журналу з ID {loan_id} не знайдено.")
+            
+            session.delete(loan_to_delete)
+            response = self._execute_dml_orm(session)
+            return response
+        finally:
+            session.close()
 
-    # Генерація 
+    # Генерація
+    
     def generate_authors(self, count):
-        query = """
+        session = self.Session()
+        
+        query = text(f"""
             INSERT INTO author (first_name, last_name, email)
             SELECT
                 (array[
@@ -230,11 +400,23 @@ class Model:
                 
                 'author.' || i::text || '@authors.com' AS email
             FROM
-                generate_series(1, %s) AS s(i);
-        """
-        return self._execute_dml(query, (count,))
+                generate_series(1, {count}) AS s(i)
+            ON CONFLICT (email) DO NOTHING;
+        """)
+        try:
+            session.execute(query)
+            response = self._execute_dml_orm(session)
+            return response
+        except Exception as e:
+            session.rollback()
+            return (False, f"Помилка генерації авторів: {e}")
+        finally:
+            session.close()
+            
     def generate_readers(self, count):
-        query = """
+        session = self.Session()
+        
+        query = text(f"""
             INSERT INTO reader (first_name, last_name, email)
             SELECT
                 (array[
@@ -249,12 +431,23 @@ class Model:
                 
                 'reader.' || i::text || '@library.ua' AS email
             FROM
-                generate_series(1, %s) AS s(i);
-        """
-        return self._execute_dml(query, (count,))
-    
+                generate_series(1, {count}) AS s(i)
+            ON CONFLICT (email) DO NOTHING;
+        """)
+        try:
+            session.execute(query)
+            response = self._execute_dml_orm(session)
+            return response
+        except Exception as e:
+            session.rollback()
+            return (False, f"Помилка генерації читачів: {e}")
+        finally:
+            session.close()
+
     def generate_books(self, count):
-        query = """
+        session = self.Session()
+        
+        query = text(f"""
             INSERT INTO book (name, year_published, pages, id_author)
             WITH authors AS (
                 SELECT array_agg(author_id) AS ids FROM author
@@ -265,15 +458,25 @@ class Model:
                 floor(random() * (800 - 100 + 1) + 100)::int,
                 a.ids[floor(random() * array_length(a.ids, 1) + 1 + (s.id * 0))]
             FROM 
-                generate_series(1, %s) AS s(id), 
+                generate_series(1, {count}) AS s(id), 
                 authors a
             WHERE 
                 a.ids IS NOT NULL;
-        """
-        return self._execute_dml(query, (count,))
+        """)
+        try:
+            session.execute(query)
+            response = self._execute_dml_orm(session)
+            return response
+        except Exception as e:
+            session.rollback()
+            return (False, f"Помилка генерації книг: {e}")
+        finally:
+            session.close()
 
     def generate_loans(self, count):
-        query = """
+        session = self.Session()
+        
+        query = text(f"""
             INSERT INTO "LoanJournal" (id_book, id_reader, loan_date, return_date)
             WITH 
                 books AS (
@@ -288,7 +491,7 @@ class Model:
                         r.ids[floor(random() * array_length(r.ids, 1) + 1 + (s.id * 0))] AS r_id,
                         (timestamp '2020-01-01' + random() * (timestamp '2023-11-01' - timestamp '2020-01-01')) AS i_date
                     FROM 
-                        generate_series(1, %s) s(id), 
+                        generate_series(1, {count}) s(id), 
                         books b, 
                         readers r
                     WHERE
@@ -299,94 +502,141 @@ class Model:
                 r_id,
                 i_date::date,
                 CASE WHEN random() > 0.2
-                     THEN (i_date + (floor(random() * 85 + 5) || ' days')::interval)::date
-                     ELSE NULL
+                    THEN (i_date + (floor(random() * 85 + 5) || ' days')::interval)::date
+                    ELSE NULL
                 END
             FROM GeneratedData;
-        """
-        return self._execute_dml(query, (count,))
+        """)
+        try:
+            session.execute(query)
+            response = self._execute_dml_orm(session)
+            return response
+        except Exception as e:
+            session.rollback()
+            return (False, f"Помилка генерації записів журналу: {e}")
+        finally:
+            session.close()
 
-    # Пошук 
+
+    # Пошук (SELECT)
+    
     def search_books_by_author_year(self, author_last_name, start_year, end_year):
-        query = """
-            SELECT b.book_id, b.name, b.year_published, a.last_name || ' ' || a.first_name AS author_name
-            FROM book b
-            JOIN author a ON b.id_author = a.author_id
-            WHERE a.last_name LIKE %s AND b.year_published BETWEEN %s AND %s
-        """
-        return self._execute_query(query, (f"%{author_last_name}%", start_year, end_year), fetch=True)
+        session = self.Session()
+        try:
+            results = session.query(
+                Book.book_id,
+                Book.name,
+                Book.year_published,
+                (Author.last_name + ' ' + Author.first_name).label('author_name')
+            ).join(Author, Book.id_author == Author.author_id)\
+             .filter(
+                Author.last_name.ilike(f"%{author_last_name}%"),
+                Book.year_published.between(start_year, end_year)
+            ).all()
+            
+            
+            return [row._asdict() for row in results]
+        finally:
+            session.close()
 
     def search_readers_by_book_title(self, book_name_pattern):
-        query = """
-            SELECT
-                r.reader_id,
-                r.last_name,
-                r.first_name,
-                r.email,
-                b.name AS book_name  
-                
-            FROM reader r
-            JOIN "LoanJournal" l ON r.reader_id = l.id_reader
-            JOIN book b ON l.id_book = b.book_id
-            WHERE
-                b.name ILIKE %s
-            ORDER BY
-                r.last_name, r.first_name, b.name;
-        """
-        return self._execute_query(query, (book_name_pattern,))
+        session = self.Session()
+        try:
+            results = session.query(
+                Reader.reader_id,
+                Reader.last_name,
+                Reader.first_name,
+                Reader.email,
+                Book.name.label('book_name')
+            ).join(LoanJournal, Reader.reader_id == LoanJournal.id_reader)\
+             .join(Book, LoanJournal.id_book == Book.book_id)\
+             .filter(
+                Book.name.ilike(book_name_pattern)
+            ).order_by(Reader.last_name, Reader.first_name, Book.name).all()
+            
+            
+            return [row._asdict() for row in results]
+        finally:
+            session.close()
 
     def search_loans_by_date_range(self, start_date, end_date):
-        query = """
-            SELECT l.loan_id, b.name, r.last_name || ' ' || r.first_name AS reader, l.loan_date, l.return_date
-            FROM "LoanJournal" l
-            JOIN book b ON l.id_book = b.book_id
-            JOIN reader r ON l.id_reader = r.reader_id
-            WHERE l.loan_date BETWEEN %s AND %s
-            ORDER BY l.loan_date
-        """
-        return self._execute_query(query, (start_date, end_date), fetch=True)
+        session = self.Session()
+        try:
+            results = session.query(
+                LoanJournal.loan_id, 
+                Book.name, 
+                (Reader.last_name + ' ' + Reader.first_name).label('reader'), 
+                LoanJournal.loan_date, 
+                LoanJournal.return_date
+            ).join(Book, LoanJournal.id_book == Book.book_id)\
+             .join(Reader, LoanJournal.id_reader == Reader.reader_id)\
+             .filter(
+                LoanJournal.loan_date.between(start_date, end_date)
+            ).order_by(LoanJournal.loan_date).all()
+            
+            
+            return [row._asdict() for row in results]
+        finally:
+            session.close()
+
+    # Аналітика (SELECT)
 
     def get_books_per_author(self, last_name_pattern):
-        query = """
-            SELECT
-                a.author_id,  
-                a.last_name,
-                a.first_name,
-                COUNT(b.book_id) AS book_count
-            FROM author a
-            LEFT JOIN book b ON a.author_id = b.id_author
-            WHERE a.last_name ILIKE %s
-            GROUP BY a.author_id, a.last_name, a.first_name
-            ORDER BY book_count DESC, a.last_name;
-        """
-        return self._execute_query(query, (last_name_pattern,))
+        session = self.Session()
+        try:
+            from sqlalchemy import func
+            
+            results = session.query(
+                Author.author_id,  
+                Author.last_name,
+                Author.first_name,
+                func.count(Book.book_id).label('book_count')
+            ).outerjoin(Book, Author.author_id == Book.id_author)\
+             .filter(Author.last_name.ilike(last_name_pattern))\
+             .group_by(Author.author_id, Author.last_name, Author.first_name)\
+             .order_by(func.count(Book.book_id).desc(), Author.last_name)\
+             .all()
+            
+            
+            return [row._asdict() for row in results]
+        finally:
+            session.close()
 
     def get_top_10_readers(self):
-        query = """
-            SELECT
-                r.reader_id,
-                r.last_name,
-                r.first_name,
-                COUNT(l.loan_id) AS loan_count
-            FROM reader r
-            JOIN "LoanJournal" l ON r.reader_id = l.id_reader
-            GROUP BY r.reader_id, r.last_name, r.first_name
-            ORDER BY loan_count DESC
-            LIMIT 10;
-        """
-        return self._execute_query(query, fetch=True)
+        session = self.Session()
+        try:
+            from sqlalchemy import func
+            
+            results = session.query(
+                Reader.reader_id,
+                Reader.last_name,
+                Reader.first_name,
+                func.count(LoanJournal.loan_id).label('loan_count')
+            ).join(LoanJournal, Reader.reader_id == LoanJournal.id_reader)\
+             .group_by(Reader.reader_id, Reader.last_name, Reader.first_name)\
+             .order_by(func.count(LoanJournal.loan_id).desc())\
+             .limit(10)\
+             .all()
+            
+            
+            return [row._asdict() for row in results]
+        finally:
+            session.close()
 
     def get_avg_loan_duration(self):
-        query = """
-            SELECT AVG(return_date - loan_date) AS avg_duration_days
-            FROM "LoanJournal"
-            WHERE return_date IS NOT NULL AND return_date >= loan_date
-        """
-        return self._execute_query(query, fetch=True)
+        session = self.Session()
+        try:
+            from sqlalchemy import func
+            
+            avg_duration_query = func.avg(LoanJournal.return_date - LoanJournal.loan_date).label('avg_duration_days')
+            
+            results = session.query(avg_duration_query)\
+                             .filter(LoanJournal.return_date.isnot(None), LoanJournal.return_date >= LoanJournal.loan_date)\
+                             .all()
+            
+            return [{'avg_duration_days': results[0][0]}] if results else []
+        finally:
+            session.close()
 
     def close(self):
-        if self.cursor:
-            self.cursor.close()
-        if self.conn:
-            self.conn.close()
-            print("З'єднання з БД закрито.")
+        print("З'єднання з БД закрито.")
